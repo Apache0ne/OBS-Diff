@@ -40,7 +40,7 @@
 * **[2026-01-26]** 🎉 **Accepted by ICLR 2026!** Let's talk about sparsity and efficiency in Brazil! 🇧🇷 
 
 <div align="left">
-  <img src="./figures/obs-diff-poster-v1.png"  width="100%">
+  <img src="./figures/obs-diff-poster-v2.png"  width="100%">
   <br>
 </div>
 
