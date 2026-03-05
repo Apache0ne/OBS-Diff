@@ -130,7 +130,7 @@ Then, install the dependencies:
 ```bash
 pip install -r requirements.txt
 ```
-You need to install models (SD3-Medium) from [Hugging Face](https://huggingface.co/stabilityai/stable-diffusion-3-medium) and calibration dataset (GCC3M) from [Conceptual Caption 12M](https://ai.google.com/research/ConceptualCaptions/download).
+You need to install models (SD3-Medium) from [Hugging Face](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) and calibration dataset (GCC3M) from [Conceptual Caption 12M](https://ai.google.com/research/ConceptualCaptions/download).
 
 ## 2. Data Preprocessing
 To prepare the calibration dataset, we utilize the GCC3M subset.
