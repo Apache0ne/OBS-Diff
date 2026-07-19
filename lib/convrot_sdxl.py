@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import importlib.metadata
 import json
 from collections import Counter
 from pathlib import Path
@@ -49,7 +50,10 @@ def load_comfy_quant_runtime():
     from comfy_kitchen.tensor.convrot_w4a4 import TensorCoreConvRotW4A4Layout  # noqa: F401
     from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout  # noqa: F401
 
-    version = getattr(comfy_kitchen, "__version__", "0.0.0")
+    try:
+        version = importlib.metadata.version("comfy-kitchen")
+    except importlib.metadata.PackageNotFoundError:
+        version = getattr(comfy_kitchen, "__version__", "0.0.0")
     if _version_tuple(version) < COMFY_MIN_VERSION:
         raise RuntimeError(
             f"comfy-kitchen>={'.'.join(map(str, COMFY_MIN_VERSION))} is required; loaded {version}"
