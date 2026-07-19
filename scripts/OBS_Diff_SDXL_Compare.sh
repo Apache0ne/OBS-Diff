@@ -12,7 +12,7 @@ python -u obs_diff_sdxl_colab.py \
   --steps 4 \
   --guidance-scale 0.0 \
   --dtype float16 \
-  --calibration-prompts 8 \
+  --calibration-prompts 16 \
   --calibration-size 512 \
   --compare-size 1024 \
   --coco-captions "$COCO_CAPTIONS" \
