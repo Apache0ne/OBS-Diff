@@ -10,15 +10,17 @@ import obs_diff_sdxl_hybrid as core
 
 def expanded_ratios(target):
     # FFNs remain the primary source of physical reduction. The aggressive tail
-    # exists so 40/50% whole-UNet experiments are reachable; the search only
-    # uses it when the requested physical budget cannot be met more gently.
+    # exists so 40/50% whole-UNet experiments are reachable; the OBS cost and
+    # attention penalties keep these levels unused unless the budget requires it.
     if target.kind == "ff":
         return [
             0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35,
-            0.40, 0.50, 0.60, 0.70, 0.80, 0.85,
+            0.40, 0.50, 0.60, 0.70, 0.80, 0.85, 0.90, 0.95,
         ]
     heads = target.width // target.group_size
-    maximum = 0.20 if target.attention_name == "attn2" else 0.35
+    # Cross-attention remains more restricted than self-attention. These upper
+    # limits are primarily for the extreme 40/50% whole-UNet experiments.
+    maximum = 0.30 if target.attention_name == "attn2" else 0.50
     max_remove = max(1, int(math.floor(heads * maximum)))
     return [k / heads for k in range(0, max_remove + 1)]
 
