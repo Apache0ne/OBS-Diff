@@ -70,9 +70,6 @@ def score_value(value: Any)->float:
     return float(value)
 
 
-def label(r): return f"{int(round(float(r)*100)):02d}"
-
-
 def uri(path):
     buf=BytesIO(); Image.open(path).convert("RGB").save(buf,"JPEG",quality=90,optimize=True)
     return "data:image/jpeg;base64,"+base64.b64encode(buf.getvalue()).decode()
@@ -80,12 +77,22 @@ def uri(path):
 
 def build(data: Dict[str,Any], path: Path):
     variants=list(data["variants"].keys()); summary=data["imagereward_summary"]
+    structured=any("parameter_reduction_fraction" in data["variants"][v] for v in variants)
     css="body{font-family:Arial;background:#f3f4f6;margin:20px}.card{background:white;padding:15px;margin:12px 0;border:1px solid #ccc}.grid{display:grid;grid-template-columns:repeat(5,minmax(220px,1fr));gap:8px;overflow-x:auto}.win{border-left:6px solid #238636}.loss{border-left:6px solid #b42318}img{width:100%}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:6px}pre{white-space:pre-wrap;background:#111;color:#eee;padding:10px}"
-    out=[f"<!doctype html><html><head><meta charset='utf-8'><style>{css}</style></head><body><h1>OBS-Diff SDXL ImageReward comparison</h1>"]
-    out.append("<section class='card'><table><tr><th>Variant</th><th>Mean IR</th><th>Mean delta</th><th>Median delta</th><th>Wins</th><th>Target sparsity</th><th>Overall UNet zeros</th><th>Mean seconds</th></tr>")
+    title="Structured OBS-Diff SDXL ImageReward comparison" if structured else "OBS-Diff SDXL ImageReward comparison"
+    out=[f"<!doctype html><html><head><meta charset='utf-8'><style>{css}</style></head><body><h1>{title}</h1>"]
+    if structured:
+        out.append("<section class='card'><table><tr><th>Variant</th><th>Mean IR</th><th>Mean delta</th><th>Median delta</th><th>Wins</th><th>Physical parameter reduction</th><th>UNet params</th><th>.pth GiB</th><th>Mean seconds</th></tr>")
+    else:
+        out.append("<section class='card'><table><tr><th>Variant</th><th>Mean IR</th><th>Mean delta</th><th>Median delta</th><th>Wins</th><th>Target sparsity</th><th>Overall UNet zeros</th><th>Mean seconds</th></tr>")
     for v in variants:
         s=summary[v]; p=data["variants"][v]
-        out.append(f"<tr><td>{v}</td><td>{s['mean_imagereward']:+.6f}</td><td>{s['mean_delta_vs_dense']:+.6f}</td><td>{s['median_delta_vs_dense']:+.6f}</td><td>{s['wins_vs_dense']}/{s['cases']}</td><td>{100*p.get('target_sparsity',0):.4f}%</td><td>{100*p.get('overall_unet_zero_fraction',0):.4f}%</td><td>{p['mean_generation_seconds']:.4f}</td></tr>")
+        prefix=f"<tr><td>{v}</td><td>{s['mean_imagereward']:+.6f}</td><td>{s['mean_delta_vs_dense']:+.6f}</td><td>{s['median_delta_vs_dense']:+.6f}</td><td>{s['wins_vs_dense']}/{s['cases']}</td>"
+        if structured:
+            row=prefix+f"<td>{100*p.get('parameter_reduction_fraction',0):.4f}%</td><td>{p.get('unet_parameters',0)/1e9:.4f}B</td><td>{p.get('pth_bytes',0)/1024**3:.3f}</td><td>{p['mean_generation_seconds']:.4f}</td></tr>"
+        else:
+            row=prefix+f"<td>{100*p.get('target_sparsity',0):.4f}%</td><td>{100*p.get('overall_unet_zero_fraction',0):.4f}%</td><td>{p['mean_generation_seconds']:.4f}</td></tr>"
+        out.append(row)
     out.append("</table></section>")
     for case in data["cases"]:
         dense=float(case["images"]["dense"]["imagereward"])
@@ -98,7 +105,8 @@ def build(data: Dict[str,Any], path: Path):
                 m=case["metrics"][v]; detail+=f" | PSNR {m['psnr_db']:.2f} | MAE {m['mae_0_1']:.4f}"
             out.append(f"<figure class='{cls}'><b>{v}</b><br><small>{detail}</small><img src='{uri(rec['path'])}'></figure>")
         out.append("</div></section>")
-    out.append("<section class='card'><p>Exports retain dense tensor shapes with zero weights. Standard dense CUDA kernels do not automatically produce sparse speedups.</p></section>")
+    note=("Structured exports physically remove FFN neurons and attention heads; .pth files contain complete smaller UNet objects." if structured else "Unstructured exports retain dense tensor shapes with zero weights; dense CUDA kernels do not automatically produce sparse speedups.")
+    out.append(f"<section class='card'><p>{note}</p></section>")
     out.append("<section class='card'><pre>"+html.escape(json.dumps(data,indent=2))+"</pre></section></body></html>")
     path.write_text("".join(out),encoding="utf-8")
 
