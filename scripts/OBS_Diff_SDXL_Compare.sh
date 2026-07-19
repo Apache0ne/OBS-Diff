@@ -5,7 +5,7 @@ MODEL_PATH="${MODEL_PATH:-/content/models/hyper_sdxl_4step_471056.safetensors}"
 OUTPUT_DIR="${OUTPUT_DIR:-/content/obs_diff_sdxl_results}"
 COCO_CAPTIONS="${COCO_CAPTIONS:-/content/coco/annotations/captions_val2017.json}"
 
-python -u obs_diff_sdxl.py \
+python -u obs_diff_sdxl_colab.py \
   --model "$MODEL_PATH" \
   --output-dir "$OUTPUT_DIR" \
   --ratios 0.20,0.30,0.40,0.50 \
