@@ -25,6 +25,33 @@ def expanded_ratios(target):
     return [k / heads for k in range(0, max_remove + 1)]
 
 
+def clear_gradient_checkpointing_state(unet):
+    """Remove Diffusers runtime checkpoint closures so the UNet is pickle-safe."""
+    try:
+        unet.disable_gradient_checkpointing()
+    except Exception:
+        pass
+
+    removed_closures = 0
+    disabled_modules = 0
+    for module in unet.modules():
+        if hasattr(module, "gradient_checkpointing"):
+            try:
+                module.gradient_checkpointing = False
+                disabled_modules += 1
+            except Exception:
+                pass
+        if "_gradient_checkpointing_func" in module.__dict__:
+            del module.__dict__["_gradient_checkpointing_func"]
+            removed_closures += 1
+
+    print(
+        "  gradient checkpoint cleanup: "
+        f"disabled_modules={disabled_modules} "
+        f"removed_runtime_closures={removed_closures}"
+    )
+
+
 def l4_recover_student(a, unet, record_path, plan):
     """Recover selected output projections with FP32 parameter gradients.
 
@@ -33,10 +60,12 @@ def l4_recover_student(a, unet, record_path, plan):
     temporarily stored in FP32 for recovery, then cast back before export.
     """
     if a.recovery_steps <= 0 or record_path is None:
+        clear_gradient_checkpointing_state(unet)
         return []
 
     records = torch.load(record_path, map_location="cpu", weights_only=False)
     if not records:
+        clear_gradient_checkpointing_state(unet)
         return []
 
     model_dtype = next(unet.parameters()).dtype
@@ -70,6 +99,7 @@ def l4_recover_student(a, unet, record_path, plan):
                 seen_parameters.add(id(parameter))
 
     if not trainable:
+        clear_gradient_checkpointing_state(unet)
         return []
 
     unet.enable_gradient_checkpointing()
@@ -139,6 +169,7 @@ def l4_recover_student(a, unet, record_path, plan):
         unet.eval()
         for parameter in unet.parameters():
             parameter.requires_grad_(False)
+        clear_gradient_checkpointing_state(unet)
         optimizer.zero_grad(set_to_none=True)
         del optimizer, scaler, records
         torch.cuda.empty_cache()
@@ -148,6 +179,7 @@ def l4_recover_student(a, unet, record_path, plan):
 
 core.allowed_ratios = expanded_ratios
 core.recover_student = l4_recover_student
+core.clear_gradient_checkpointing_state = clear_gradient_checkpointing_state
 
 if __name__ == "__main__":
     core.main()
