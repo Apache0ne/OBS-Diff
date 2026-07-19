@@ -26,15 +26,28 @@ def expanded_ratios(target):
 
 
 def l4_recover_student(a, unet, record_path, plan):
-    """Output-projection teacher recovery with zero optimizer-state overhead."""
+    """Recover selected output projections with FP32 parameter gradients.
+
+    GradScaler cannot unscale gradients stored directly in FP16 parameters. The
+    physically pruned UNet remains FP16, but selected output projections are
+    temporarily stored in FP32 for recovery, then cast back before export.
+    """
     if a.recovery_steps <= 0 or record_path is None:
         return []
+
     records = torch.load(record_path, map_location="cpu", weights_only=False)
+    if not records:
+        return []
+
+    model_dtype = next(unet.parameters()).dtype
     for parameter in unet.parameters():
         parameter.requires_grad_(False)
 
+    trainable_modules = []
     trainable = []
-    seen = set()
+    seen_modules = set()
+    seen_parameters = set()
+
     for target_id, selected in plan.items():
         if selected["ratio"] <= 0:
             continue
@@ -44,54 +57,92 @@ def l4_recover_student(a, unet, record_path, plan):
             module = block.ff.net[2]
         else:
             module = getattr(block, selected["attention_name"]).to_out[0]
+
+        if id(module) not in seen_modules:
+            module.to(dtype=torch.float32)
+            trainable_modules.append(module)
+            seen_modules.add(id(module))
+
         for parameter in module.parameters():
-            if id(parameter) not in seen:
+            if id(parameter) not in seen_parameters:
                 parameter.requires_grad_(True)
                 trainable.append(parameter)
-                seen.add(id(parameter))
+                seen_parameters.add(id(parameter))
 
     if not trainable:
         return []
 
+    unet.enable_gradient_checkpointing()
     unet.train()
     optimizer = torch.optim.SGD(trainable, lr=a.recovery_lr, momentum=0.0)
-    scaler = torch.cuda.amp.GradScaler(enabled=a.dtype == "float16")
+    scaler = torch.amp.GradScaler("cuda", enabled=(model_dtype == torch.float16))
     losses = []
 
-    for step in range(a.recovery_steps):
-        record = records[step % len(records)]
-        optimizer.zero_grad(set_to_none=True)
-        dtype = next(unet.parameters()).dtype
-        sample = record["sample"].to("cuda", dtype=dtype)
-        timestep = record["t"].to("cuda")
-        encoder_hidden_states = record["encoder_hidden_states"].to("cuda", dtype=dtype)
-        text_embeds = record["text_embeds"].to("cuda", dtype=dtype)
-        time_ids = record["time_ids"].to("cuda", dtype=dtype)
-        teacher_target = record["target"].to("cuda", dtype=torch.float32)
+    try:
+        for step in range(a.recovery_steps):
+            record = records[step % len(records)]
+            optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(enabled=True, dtype=dtype):
-            prediction = unet(
+            sample = record["sample"].to("cuda", dtype=model_dtype)
+            timestep = record["t"].to("cuda")
+            encoder_hidden_states = record["encoder_hidden_states"].to(
+                "cuda", dtype=model_dtype
+            )
+            text_embeds = record["text_embeds"].to("cuda", dtype=model_dtype)
+            time_ids = record["time_ids"].to("cuda", dtype=model_dtype)
+            teacher_target = record["target"].to("cuda", dtype=torch.float32)
+
+            with torch.autocast(
+                device_type="cuda",
+                dtype=model_dtype,
+                enabled=model_dtype in (torch.float16, torch.bfloat16),
+            ):
+                prediction = unet(
+                    sample,
+                    timestep,
+                    encoder_hidden_states=encoder_hidden_states,
+                    added_cond_kwargs={
+                        "text_embeds": text_embeds,
+                        "time_ids": time_ids,
+                    },
+                ).sample
+                loss = torch.nn.functional.mse_loss(
+                    prediction.float(), teacher_target
+                )
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            losses.append(float(loss.item()))
+            print(
+                f"  recovery step {step + 1:03d}/{a.recovery_steps}: "
+                f"loss={losses[-1]:.8f}"
+            )
+
+            del (
                 sample,
                 timestep,
-                encoder_hidden_states=encoder_hidden_states,
-                added_cond_kwargs={"text_embeds": text_embeds, "time_ids": time_ids},
-            ).sample
-            loss = torch.nn.functional.mse_loss(prediction.float(), teacher_target)
-
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        losses.append(float(loss.item()))
-        print(f"  recovery step {step + 1:03d}/{a.recovery_steps}: loss={losses[-1]:.8f}")
-
-        del sample, encoder_hidden_states, text_embeds, time_ids, teacher_target, prediction, loss
+                encoder_hidden_states,
+                text_embeds,
+                time_ids,
+                teacher_target,
+                prediction,
+                loss,
+            )
+            torch.cuda.empty_cache()
+    finally:
+        for module in trainable_modules:
+            module.to(dtype=model_dtype)
+        unet.eval()
+        for parameter in unet.parameters():
+            parameter.requires_grad_(False)
+        optimizer.zero_grad(set_to_none=True)
+        del optimizer, scaler, records
         torch.cuda.empty_cache()
 
-    unet.eval()
-    for parameter in unet.parameters():
-        parameter.requires_grad_(False)
     return losses
 
 
