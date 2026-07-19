@@ -2,8 +2,9 @@
 """Score OBS-Diff SDXL comparison images with ImageReward.
 
 Run in a child process whose PYTHONPATH starts with a Transformers 4.36.2
---target directory. The ImageReward package root is bypassed so its ReFL,
-datasets, and Diffusers training imports are not executed.
+--target directory. The ImageReward package root and unrelated model-package
+initializers are bypassed so ReFL, datasets, Diffusers training, AestheticScore,
+and the optional OpenAI CLIP dependency are not imported.
 """
 from __future__ import annotations
 
@@ -43,6 +44,18 @@ def prepare(root: Path):
             setattr(mu,name,getattr(pu,name))
 
 
+def _stub_package(name: str, path: Path):
+    package=types.ModuleType(name)
+    package.__file__=str(path/"__init__.py")
+    package.__package__=name
+    package.__path__=[str(path)]
+    spec=importlib.machinery.ModuleSpec(name,loader=None,is_package=True)
+    spec.submodule_search_locations=[str(path)]
+    package.__spec__=spec
+    sys.modules[name]=package
+    return package
+
+
 def import_inference():
     source=None
     for entry in sys.path:
@@ -52,13 +65,17 @@ def import_inference():
     if source is None: raise RuntimeError("ImageReward package not found")
     for name in list(sys.modules):
         if name=="ImageReward" or name.startswith("ImageReward."): del sys.modules[name]
-    package=types.ModuleType("ImageReward"); package.__file__=str(source/"__init__.py")
-    package.__package__="ImageReward"; package.__path__=[str(source)]
-    spec=importlib.machinery.ModuleSpec("ImageReward",loader=None,is_package=True)
-    spec.submodule_search_locations=[str(source)]; package.__spec__=spec
-    sys.modules["ImageReward"]=package
+
+    # ImageReward/models/__init__.py imports AestheticScore, which imports the
+    # optional `clip` package even though ImageReward inference does not use it.
+    # Stub only the package initializers while leaving the actual BLIP modules
+    # importable from their real filesystem paths.
+    _stub_package("ImageReward",source)
+    _stub_package("ImageReward.models",source/"models")
+    _stub_package("ImageReward.models.BLIP",source/"models"/"BLIP")
+
     utils=importlib.import_module("ImageReward.utils")
-    for forbidden in ("ImageReward.ReFL","datasets","diffusers"):
+    for forbidden in ("ImageReward.ReFL","ImageReward.models.AestheticScore","datasets","diffusers","clip"):
         if forbidden in sys.modules: raise RuntimeError(f"Unexpected inference import: {forbidden}")
     return utils,source
 
@@ -128,7 +145,7 @@ def main():
         deltas=[x-y for x,y in zip(scores,dense)]
         summary[v]={"cases":len(scores),"mean_imagereward":float(np.mean(scores)),"mean_delta_vs_dense":float(np.mean(deltas)),"median_delta_vs_dense":float(np.median(deltas)),"minimum_delta_vs_dense":float(np.min(deltas)),"maximum_delta_vs_dense":float(np.max(deltas)),"wins_vs_dense":int(sum(x>0 for x in deltas)),"losses_vs_dense":int(sum(x<0 for x in deltas))}
     data["imagereward_summary"]=summary
-    data["imagereward_environment"]={"transformers":__import__("transformers").__version__,"image_reward_source":str(source),"refl_imported":"ImageReward.ReFL" in sys.modules,"datasets_imported":"datasets" in sys.modules,"diffusers_imported":"diffusers" in sys.modules}
+    data["imagereward_environment"]={"transformers":__import__("transformers").__version__,"image_reward_source":str(source),"refl_imported":"ImageReward.ReFL" in sys.modules,"aesthetic_score_imported":"ImageReward.models.AestheticScore" in sys.modules,"clip_imported":"clip" in sys.modules,"datasets_imported":"datasets" in sys.modules,"diffusers_imported":"diffusers" in sys.modules}
     Path(a.output_json).write_text(json.dumps(data,indent=2)); build(data,Path(a.output_html))
     print(f"Scored JSON: {a.output_json}\nScored HTML: {a.output_html}")
 
