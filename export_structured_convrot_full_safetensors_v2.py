@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Robust v2 exporter for structured ConvRot SDXL full SafeTensors.
 
-Fixes two failure classes in the original exporter:
+Fixes exporter compatibility and diagnostics:
 1. Source CLIP/VAE tensors are cloned while safe_open is still alive instead of
    retaining mmap-backed views after the context closes.
 2. Architecture and layout metadata are normalized without losing tuple shape
    information required by Comfy-Kitchen reconstruction.
+3. Diffusers config objects are accepted as FrozenDict, Mapping, or objects with
+   to_dict(), covering the pickled structured UNets produced by this project.
 
 The script writes a complete traceback to PROFILE_export_error.log on failure.
 """
@@ -81,10 +83,55 @@ def _encode_param_value(value: Any, tensors: MutableMapping[str, torch.Tensor], 
     return _json_safe(value)
 
 
+def _config_dict(unet: torch.nn.Module):
+    """Return an ordinary dictionary from Diffusers ConfigMixin or FrozenDict."""
+    config = getattr(unet, "config", None)
+    if config is None:
+        raise AttributeError("Loaded UNet has no config attribute")
+    if hasattr(config, "to_dict") and callable(config.to_dict):
+        value = config.to_dict()
+    elif isinstance(config, Mapping):
+        value = dict(config)
+    else:
+        try:
+            value = dict(config)
+        except Exception:
+            value = dict(vars(config))
+    if not isinstance(value, Mapping):
+        raise TypeError(f"UNet config did not resolve to a mapping: {type(value)}")
+    return _json_safe(dict(value))
+
+
 def _architecture(unet: torch.nn.Module):
-    result = core._ORIGINAL_ARCHITECTURE(unet)
-    result["config"] = _json_safe(result["config"])
-    return result
+    """Extract exact pruned Linear shapes and attention metadata."""
+    linears = []
+    attentions = []
+    for path, module in unet.named_modules(remove_duplicate=False):
+        if isinstance(module, torch.nn.Linear):
+            linears.append(
+                {
+                    "path": path,
+                    "in": int(module.in_features),
+                    "out": int(module.out_features),
+                    "bias": module.bias is not None,
+                    "dtype": core._dtype_name(module.weight.dtype),
+                }
+            )
+        if all(hasattr(module, name) for name in ("heads", "inner_dim", "to_q", "to_k", "to_v", "to_out")):
+            attentions.append(
+                {
+                    "path": path,
+                    "heads": int(module.heads),
+                    "inner_dim": int(module.inner_dim),
+                    "inner_kv_dim": int(getattr(module, "inner_kv_dim", module.inner_dim)),
+                    "sliceable_head_dim": int(getattr(module, "sliceable_head_dim", module.heads)),
+                }
+            )
+    if not linears:
+        raise RuntimeError("Architecture extraction found no Linear modules")
+    if not attentions:
+        raise RuntimeError("Architecture extraction found no attention modules")
+    return {"config": _config_dict(unet), "linears": linears, "attentions": attentions}
 
 
 def _copy_source_without_unet(source: Path, output):
@@ -139,6 +186,21 @@ def write_runtime_bundle(output_dir: Path, source_dir: Path):
     return runtime
 
 
+def _architecture_preflight(pth: Path):
+    """Fail before copying the 2.4 GiB source checkpoint if config extraction is invalid."""
+    print("Architecture preflight: loading structured UNet metadata", flush=True)
+    unet = torch.load(str(pth), map_location="cpu", weights_only=False)
+    if not isinstance(unet, torch.nn.Module):
+        raise TypeError(f"Expected UNet nn.Module, got {type(unet)}")
+    result = _architecture(unet)
+    print(
+        f"Architecture preflight: PASS | config_keys={len(result['config'])} "
+        f"linears={len(result['linears'])} attentions={len(result['attentions'])}",
+        flush=True,
+    )
+    del unet
+
+
 def main():
     args = parse_args()
     source = Path(args.clip_vae_source).resolve()
@@ -159,6 +221,7 @@ def main():
     print("Output:", output, flush=True)
     print("=" * 100, flush=True)
 
+    _architecture_preflight(pth)
     result = core.build_full_checkpoint(
         pth,
         source,
@@ -184,7 +247,6 @@ def main():
     print(f"COMPLETE {args.profile}: {output.stat().st_size / 1024**3:.3f} GiB", flush=True)
 
 
-core._ORIGINAL_ARCHITECTURE = core._architecture
 core._encode_param_value = _encode_param_value
 core._architecture = _architecture
 core._copy_source_without_unet = _copy_source_without_unet
