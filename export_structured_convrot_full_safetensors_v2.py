@@ -4,17 +4,15 @@
 Fixes two failure classes in the original exporter:
 1. Source CLIP/VAE tensors are cloned while safe_open is still alive instead of
    retaining mmap-backed views after the context closes.
-2. All architecture/layout metadata is recursively normalized to JSON-safe
-   values before embedding it in SafeTensors metadata.
+2. Architecture and layout metadata are normalized without losing tuple shape
+   information required by Comfy-Kitchen reconstruction.
 
-The script writes a complete traceback to export_error.log on every failure.
+The script writes a complete traceback to PROFILE_export_error.log on failure.
 """
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import enum
-import gc
 import json
 import shutil
 import sys
@@ -48,22 +46,21 @@ def parse_args():
 
 
 def _json_safe(value: Any):
+    """Normalize general Diffusers config values; tuples become JSON arrays."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, torch.dtype):
-        return {"dtype": core._dtype_name(value)}
+        return str(value).replace("torch.", "")
     if isinstance(value, torch.device):
-        return {"device": str(value)}
+        return str(value)
     if isinstance(value, enum.Enum):
         return _json_safe(value.value)
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return {"tuple": [_json_safe(item) for item in value]}
-    if isinstance(value, list):
+    if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
     if isinstance(value, set):
-        return {"set": [_json_safe(item) for item in sorted(value, key=str)]}
+        return [_json_safe(item) for item in sorted(value, key=str)]
     if hasattr(value, "item") and callable(value.item):
         try:
             return _json_safe(value.item())
@@ -73,9 +70,14 @@ def _json_safe(value: Any):
 
 
 def _encode_param_value(value: Any, tensors: MutableMapping[str, torch.Tensor], key: str):
+    """Encode Comfy layout params using markers understood by the core loader."""
     if isinstance(value, torch.Tensor):
         tensors[key] = core._cpu(value)
         return {"tensor": key}
+    if isinstance(value, torch.dtype):
+        return {"dtype": core._dtype_name(value)}
+    if isinstance(value, tuple):
+        return {"tuple": [_json_safe(item) for item in value]}
     return _json_safe(value)
 
 
@@ -95,8 +97,6 @@ def _copy_source_without_unet(source: Path, output):
             if key.startswith(core.SOURCE_UNET_PREFIX):
                 counts["removed_old_unet"] += 1
                 continue
-            # clone() is mandatory here. contiguous() alone may keep an mmap view
-            # whose owner disappears when safe_open exits.
             output[key] = source_file.get_tensor(key).contiguous().clone()
             if key.startswith(core.CLIP_PREFIXES):
                 counts["clip"] += 1
@@ -184,7 +184,6 @@ def main():
     print(f"COMPLETE {args.profile}: {output.stat().st_size / 1024**3:.3f} GiB", flush=True)
 
 
-# Preserve originals before monkeypatching the core module.
 core._ORIGINAL_ARCHITECTURE = core._architecture
 core._encode_param_value = _encode_param_value
 core._architecture = _architecture
